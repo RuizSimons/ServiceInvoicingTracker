@@ -63,7 +63,7 @@ def convert_french_hours(time_str):
     if match:
         hours = int(match.group(1))
         minutes = int(match.group(2))
-        return hours + (minutes / 60)
+        return float(hours + (minutes / 60))
     return 0.0
 
 def load_data():
@@ -80,15 +80,20 @@ if wip_file and labor_file:
     try:
         # 1. Load WIP Data
         df_wip = pd.read_excel(wip_file)
-        df_wip['WO No.'] = df_wip['WO No.'].astype(str)
+        # FORCE DATA TYPES: Ensure WO No is a string and Amount is a float
+        df_wip['WO No.'] = df_wip['WO No.'].astype(str).str.strip()
+        df_wip['Amount'] = pd.to_numeric(df_wip['Amount'], errors='coerce').fillna(0.0)
+        
         # Map Status
-        df_wip['Status_Desc'] = df_wip['Status'].astype(str).map(STATUS_MAP).fillna(df_wip['Status'])
+        df_wip['Status_Desc'] = df_wip['Status'].astype(str).map(STATUS_MAP).fillna(df_wip['Status'].astype(str))
 
         # 2. Load Labor Register (Irium)
         df_labor = pd.read_excel(labor_file)
-        df_labor['WO No.'] = df_labor['WO No.'].astype(str)
+        df_labor['WO No.'] = df_labor['WO No.'].astype(str).str.strip()
+        df_labor['Time carried out'] = pd.to_numeric(df_labor['Time carried out'], errors='coerce').fillna(0.0)
+        
         # Map Technicians in Labor file
-        df_labor['Technician_Name'] = df_labor['Shre Salarie'].astype(str).map(TECH_MAP).fillna(df_labor['Shre Salarie'])
+        df_labor['Technician_Name'] = df_labor['Shre Salarie'].astype(str).map(TECH_MAP).fillna(df_labor['Shre Salarie'].astype(str))
         
         # 3. Load New Timesheet
         df_ts_clean = pd.DataFrame(columns=['WO No.', 'Hours', 'Technician_From_TS'])
@@ -101,8 +106,9 @@ if wip_file and labor_file:
             if ts_wo_col in df_ts.columns:
                 df_ts_clean = df_ts[[ts_wo_col, ts_hrs_col, ts_tech_col]].copy()
                 df_ts_clean.columns = ['WO No.', 'Hours_Raw', 'Technician_From_TS']
-                df_ts_clean['WO No.'] = df_ts_clean['WO No.'].astype(str)
+                df_ts_clean['WO No.'] = df_ts_clean['WO No.'].astype(str).str.strip()
                 df_ts_clean['Hours'] = df_ts_clean['Hours_Raw'].apply(convert_french_hours)
+                
                 # Keep tech names for reference
                 df_ts_clean = df_ts_clean.groupby('WO No.').agg({
                     'Hours': 'sum',
@@ -117,10 +123,15 @@ if wip_file and labor_file:
             'Technician_Name': lambda x: ", ".join(set(x.astype(str)))
         }).reset_index()
 
+        # Merging with consistent keys
         merged = pd.merge(df_wip, labor_summary, on='WO No.', how='outer', suffixes=('_wip', '_labor'))
         merged = pd.merge(merged, df_ts_clean, on='WO No.', how='left')
         
-        merged['Total_Hours'] = merged['Time carried out'].fillna(0) + merged['Hours'].fillna(0)
+        # Ensure all numeric columns are float for the final calculations
+        merged['Time carried out'] = merged['Time carried out'].fillna(0.0)
+        merged['Hours'] = merged['Hours'].fillna(0.0)
+        merged['Total_Hours'] = merged['Time carried out'] + merged['Hours']
+        merged['Amount'] = merged['Amount'].fillna(0.0)
         
         # Consolidate Technician Names
         merged['Final_Technician'] = merged['Technician_Name'].fillna('') + ", " + merged['Technician_From_TS'].fillna('')
@@ -128,13 +139,13 @@ if wip_file and labor_file:
 
         # --- Reasoning & Financial Logic ---
         def analyze_job(row):
-            wip_amt = row.get('Amount', 0)
-            hrs = row.get('Total_Hours', 0)
+            wip_amt = float(row.get('Amount', 0.0))
+            hrs = float(row.get('Total_Hours', 0.0))
             sort_val = str(row.get('Sort_wip', row.get('Sort_labor', '')))
             rate = INTERNAL_RATE if 'CES' in sort_val else EXTERNAL_RATE
             
-            est_labor_val = hrs * rate
-            inferred_parts = wip_amt - est_labor_val
+            est_labor_val = float(hrs * rate)
+            inferred_parts = float(wip_amt - est_labor_val)
             
             if wip_amt > 0 and hrs > 0:
                 status = "✅ Ready (Data Matched)"
@@ -153,16 +164,19 @@ if wip_file and labor_file:
         st.sidebar.divider()
         st.sidebar.header("🔍 Drill-through Filters")
         
-        all_techs = sorted(list(set([t for sublist in merged['Final_Technician'].str.split(', ') for t in sublist if t])))
+        # Build tech list safely
+        tech_string = merged['Final_Technician'].str.cat(sep=', ')
+        all_techs = sorted(list(set([t.strip() for t in tech_string.split(',') if t.strip()])))
         sel_tech = st.sidebar.multiselect("Filter by Technician", options=all_techs)
         
-        all_statuses = sorted(list(merged['Status_Desc'].unique().astype(str)))
+        # Ensure Status_Desc is string for sorting/filtering
+        merged['Status_Desc'] = merged['Status_Desc'].fillna('UNKNOWN').astype(str)
+        all_statuses = sorted(list(merged['Status_Desc'].unique()))
         sel_status = st.sidebar.multiselect("Filter by WO Status", options=all_statuses)
 
         # Apply Filters
         filtered_df = merged.copy()
         if sel_tech:
-            # Filter if any of the selected techs are in the tech string
             filtered_df = filtered_df[filtered_df['Final_Technician'].apply(lambda x: any(t in str(x) for t in sel_tech))]
         if sel_status:
             filtered_df = filtered_df[filtered_df['Status_Desc'].isin(sel_status)]
@@ -184,7 +198,10 @@ if wip_file and labor_file:
             'Amount', 'Total_Hours', 'Est_Labor_Val', 'Est_Parts_Val', 'Invoicing_Status'
         ]
         
-        final_display = filtered_df[(filtered_df['Amount'] != 0) | (filtered_df['Total_Hours'] != 0)][cols_to_show]
+        # Ensure consistent types before displaying/sorting to avoid the '<' error
+        final_display = filtered_df[(filtered_df['Amount'] != 0) | (filtered_df['Total_Hours'] != 0)][cols_to_show].copy()
+        final_display['Amount'] = final_display['Amount'].astype(float)
+        
         st.dataframe(final_display.sort_values('Amount', ascending=False), use_container_width=True, hide_index=True)
 
         csv = filtered_df.to_csv(index=False).encode('utf-8')

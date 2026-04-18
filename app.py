@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 
-st.set_page_config(page_title="Service Invoicing Dashboard", layout="wide")
+st.set_page_config(page_title="Surmac Service Invoicing Insight", layout="wide")
 
 # Custom Styling
 st.markdown("""
@@ -12,15 +12,51 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-st.title("📊 Service Invoicing & Data Gap Analysis")
+st.title("📊 Surmac Service Invoicing Insight")
 st.markdown("Reconciling SAP WIP with Irium Labor and New Timesheet data.")
 
-# --- Constants from your problem description ---
+# --- Mappings provided by the user ---
+STATUS_MAP = {
+    "AC": "AC - QUOTE ACCEPTED",
+    "AF": "AF - TO INVOICE",
+    "AP": "AP - TO INVOICE PARTIALLY",
+    "CP": "CP - IN ACCOUNTING",
+    "DE": "DE - QUOTE PRINTED",
+    "EC": "EC - IN PROGRESS",
+    "ED": "ED - DEVIS EDITE",
+    "FC": "FC - INVOICED",
+    "RE": "RE - QUOTE REFUSED",
+    "TE": "TE - DEVIS TERMINÉ",
+    "TP": "TP - FINISHED PARTIALLY",
+    "TR": "TR - QUOTE TRANSFERED TO ORD",
+    "TT": "TT - TOTALLY FINISHED"
+}
+
+TECH_MAP = {
+    "2": "DILROY SEEBALACK",
+    "4": "NICOLAS BOISSEAU",
+    "5": "MICHEL FLORENTINE",
+    "7": "ANSON HESTON",
+    "8": "DITLANE JACOBS",
+    "9": "ELIZEU DA SILVA",
+    "11": "NAILI SAMIR",
+    "13": "JESSE DE MORAES LOBATO",
+    "14": "EDDER DOS SANTOS AMARAL",
+    "15": "MATTHIEU DERAIN",
+    "16": "JUNO CARVAJAL",
+    "17": "PAOLO RAMOS",
+    "18": "IBAN OBANDO",
+    "19": "HERODE ADRIEN",
+    "20": "Guevara Aguilar Jesus Alfonzo",
+    "21": "Jurman VAN GENDEREN",
+    "22": "BYRON LOPEZ"
+}
+
+# --- Constants ---
 INTERNAL_RATE = 23
 EXTERNAL_RATE = 90
 
 def convert_french_hours(time_str):
-    """Converts formats like '7h15' or '0h45' to decimal (7.25, 0.75)"""
     if pd.isna(time_str) or not isinstance(time_str, str):
         return 0.0
     match = re.match(r'(\d+)h(\d+)', str(time_str))
@@ -36,68 +72,70 @@ def load_data():
         file_wip = st.file_uploader("Upload WIP-FG.xlsx", type=['xlsx'])
         file_labor = st.file_uploader("Upload Labor_Hours_Irium.xlsx", type=['xlsx'])
         file_ts = st.file_uploader("Upload Rapport journalier des heures.xlsx", type=['xlsx'])
-    
     return file_wip, file_labor, file_ts
 
 wip_file, labor_file, ts_file = load_data()
 
 if wip_file and labor_file:
     try:
-        # 1. Load WIP Data (Checking both sheets usually present in your export)
-        df_wip = pd.read_excel(wip_file) 
-        # Ensure WO No is a string to prevent issues with leading zeros
+        # 1. Load WIP Data
+        df_wip = pd.read_excel(wip_file)
         df_wip['WO No.'] = df_wip['WO No.'].astype(str)
+        # Map Status
+        df_wip['Status_Desc'] = df_wip['Status'].astype(str).map(STATUS_MAP).fillna(df_wip['Status'])
 
-        # 2. Load Labor Register
+        # 2. Load Labor Register (Irium)
         df_labor = pd.read_excel(labor_file)
         df_labor['WO No.'] = df_labor['WO No.'].astype(str)
+        # Map Technicians in Labor file
+        df_labor['Technician_Name'] = df_labor['Shre Salarie'].astype(str).map(TECH_MAP).fillna(df_labor['Shre Salarie'])
         
-        # 3. Load New Timesheet if available
-        df_ts_clean = pd.DataFrame(columns=['WO No.', 'Hours'])
+        # 3. Load New Timesheet
+        df_ts_clean = pd.DataFrame(columns=['WO No.', 'Hours', 'Technician_From_TS'])
         if ts_file:
             df_ts = pd.read_excel(ts_file)
-            # FIX: Use double quotes because of the apostrophe in d'œuvre
             ts_wo_col = "Numéro OR — Main d'œuvre (20)"
             ts_hrs_col = "Heures travaillées"
+            ts_tech_col = "Technicien"
             
             if ts_wo_col in df_ts.columns:
-                df_ts_clean = df_ts[[ts_wo_col, ts_hrs_col]].copy()
-                df_ts_clean.columns = ['WO No.', 'Hours_Raw']
+                df_ts_clean = df_ts[[ts_wo_col, ts_hrs_col, ts_tech_col]].copy()
+                df_ts_clean.columns = ['WO No.', 'Hours_Raw', 'Technician_From_TS']
                 df_ts_clean['WO No.'] = df_ts_clean['WO No.'].astype(str)
                 df_ts_clean['Hours'] = df_ts_clean['Hours_Raw'].apply(convert_french_hours)
-                df_ts_clean = df_ts_clean.groupby('WO No.')['Hours'].sum().reset_index()
+                # Keep tech names for reference
+                df_ts_clean = df_ts_clean.groupby('WO No.').agg({
+                    'Hours': 'sum',
+                    'Technician_From_TS': lambda x: ", ".join(set(x.astype(str)))
+                }).reset_index()
 
-        # --- Data Integration (The Merging Logic) ---
-        
-        # Aggregate Irium Labor
+        # --- Data Integration ---
         labor_summary = df_labor.groupby('WO No.').agg({
             'Time carried out': 'sum',
             'Hourly rate': 'max',
-            'Sort': 'first'
+            'Sort': 'first',
+            'Technician_Name': lambda x: ", ".join(set(x.astype(str)))
         }).reset_index()
 
-        # Merge WIP with Labor Register
         merged = pd.merge(df_wip, labor_summary, on='WO No.', how='outer', suffixes=('_wip', '_labor'))
-        
-        # Merge with New Timesheet
         merged = pd.merge(merged, df_ts_clean, on='WO No.', how='left')
-        merged['Hours_New_TS'] = merged['Hours'].fillna(0)
         
-        # Combined Total Hours
-        merged['Total_Hours'] = merged['Time carried out'].fillna(0) + merged['Hours_New_TS']
+        merged['Total_Hours'] = merged['Time carried out'].fillna(0) + merged['Hours'].fillna(0)
+        
+        # Consolidate Technician Names
+        merged['Final_Technician'] = merged['Technician_Name'].fillna('') + ", " + merged['Technician_From_TS'].fillna('')
+        merged['Final_Technician'] = merged['Final_Technician'].str.strip(', ')
 
         # --- Reasoning & Financial Logic ---
         def analyze_job(row):
             wip_amt = row.get('Amount', 0)
             hrs = row.get('Total_Hours', 0)
-            # Determine rate based on 'Sort' column from your file (VTE vs CES)
             sort_val = str(row.get('Sort_wip', row.get('Sort_labor', '')))
             rate = INTERNAL_RATE if 'CES' in sort_val else EXTERNAL_RATE
             
             est_labor_val = hrs * rate
             inferred_parts = wip_amt - est_labor_val
             
-            # Status Logic
             if wip_amt > 0 and hrs > 0:
                 status = "✅ Ready (Data Matched)"
             elif wip_amt > 0 and hrs == 0:
@@ -111,32 +149,50 @@ if wip_file and labor_file:
 
         merged[['Used_Rate', 'Est_Labor_Val', 'Est_Parts_Val', 'Invoicing_Status']] = merged.apply(analyze_job, axis=1)
 
+        # --- Filters for Drill-through ---
+        st.sidebar.divider()
+        st.sidebar.header("🔍 Drill-through Filters")
+        
+        all_techs = sorted(list(set([t for sublist in merged['Final_Technician'].str.split(', ') for t in sublist if t])))
+        sel_tech = st.sidebar.multiselect("Filter by Technician", options=all_techs)
+        
+        all_statuses = sorted(list(merged['Status_Desc'].unique().astype(str)))
+        sel_status = st.sidebar.multiselect("Filter by WO Status", options=all_statuses)
+
+        # Apply Filters
+        filtered_df = merged.copy()
+        if sel_tech:
+            # Filter if any of the selected techs are in the tech string
+            filtered_df = filtered_df[filtered_df['Final_Technician'].apply(lambda x: any(t in str(x) for t in sel_tech))]
+        if sel_status:
+            filtered_df = filtered_df[filtered_df['Status_Desc'].isin(sel_status)]
+
         # --- Dashboard Display ---
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Total Open WIP", f"€{merged['Amount'].sum():,.2f}")
-        c2.metric("Total Labor Hours", f"{merged['Total_Hours'].sum():,.1f}h")
-        c3.metric("Est. Invoicable Labor", f"€{merged['Est_Labor_Val'].sum():,.2f}")
+        c1.metric("WIP Value (Filtered)", f"€{filtered_df['Amount'].sum():,.2f}")
+        c2.metric("Hours (Filtered)", f"{filtered_df['Total_Hours'].sum():,.1f}h")
+        c3.metric("Est. Labor (Filtered)", f"€{filtered_df['Est_Labor_Val'].sum():,.2f}")
         
-        ready_count = len(merged[merged['Invoicing_Status'].str.contains("✅")])
-        c4.metric("Jobs Ready to Invoice", ready_count)
+        ready_count = len(filtered_df[filtered_df['Invoicing_Status'].str.contains("✅")])
+        c4.metric("Ready Jobs (Filtered)", ready_count)
 
         st.divider()
         
-        # Table view
-        st.subheader("Work Order Details & Gap Analysis")
-        cols_to_show = ['WO No.', 'Customer name', 'Sort_wip', 'Amount', 'Total_Hours', 'Est_Labor_Val', 'Est_Parts_Val', 'Invoicing_Status']
-        # Filter out rows with zero on both sides for cleaner view
-        display_df = merged[(merged['Amount'] != 0) | (merged['Total_Hours'] != 0)][cols_to_show]
+        st.subheader("Work Order Details")
+        cols_to_show = [
+            'WO No.', 'Customer name', 'Status_Desc', 'Final_Technician', 
+            'Amount', 'Total_Hours', 'Est_Labor_Val', 'Est_Parts_Val', 'Invoicing_Status'
+        ]
         
-        st.dataframe(display_df.sort_values('Amount', ascending=False), use_container_width=True, hide_index=True)
+        final_display = filtered_df[(filtered_df['Amount'] != 0) | (filtered_df['Total_Hours'] != 0)][cols_to_show]
+        st.dataframe(final_display.sort_values('Amount', ascending=False), use_container_width=True, hide_index=True)
 
-        # Download
-        csv = merged.to_csv(index=False).encode('utf-8')
-        st.download_button("Download Full Analysis", csv, "service_analysis.csv", "text/csv")
+        csv = filtered_df.to_csv(index=False).encode('utf-8')
+        st.download_button("Download Filtered Report", csv, "surmac_drillthrough_report.csv", "text/csv")
 
     except Exception as e:
         st.error(f"Error processing files: {e}")
-        st.info("Ensure files contain headers: 'WO No.', 'Amount', 'Time carried out', and 'Numéro OR — Main d'œuvre (20)'")
+        st.info("Ensure files contain expected headers. Error details: " + str(e))
 
 else:
     st.info("Please upload the WIP and Labor Register files in the sidebar to start the analysis.")

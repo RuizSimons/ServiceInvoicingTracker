@@ -56,9 +56,9 @@ if wip_file and labor_file:
         df_ts_clean = pd.DataFrame(columns=['WO No.', 'Hours'])
         if ts_file:
             df_ts = pd.read_excel(ts_file)
-            # Map specific column name from your file
-            ts_wo_col = 'Numéro OR — Main d'œuvre (20)'
-            ts_hrs_col = 'Heures travaillées'
+            # FIX: Use double quotes because of the apostrophe in d'œuvre
+            ts_wo_col = "Numéro OR — Main d'œuvre (20)"
+            ts_hrs_col = "Heures travaillées"
             
             if ts_wo_col in df_ts.columns:
                 df_ts_clean = df_ts[[ts_wo_col, ts_hrs_col]].copy()

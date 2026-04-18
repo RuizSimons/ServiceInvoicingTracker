@@ -80,9 +80,11 @@ if wip_file and labor_file:
     try:
         # 1. Load WIP Data
         df_wip = pd.read_excel(wip_file)
-        # FORCE DATA TYPES: Ensure WO No is a string and Amount is a float
+        # Force data types and clean columns
         df_wip['WO No.'] = df_wip['WO No.'].astype(str).str.strip()
         df_wip['Amount'] = pd.to_numeric(df_wip['Amount'], errors='coerce').fillna(0.0)
+        df_wip['Branch'] = df_wip['Branch'].astype(str).str.strip()
+        df_wip['WO type'] = df_wip['WO type'].astype(str).str.strip()
         
         # Map Status
         df_wip['Status_Desc'] = df_wip['Status'].astype(str).map(STATUS_MAP).fillna(df_wip['Status'].astype(str))
@@ -127,7 +129,7 @@ if wip_file and labor_file:
         merged = pd.merge(df_wip, labor_summary, on='WO No.', how='outer', suffixes=('_wip', '_labor'))
         merged = pd.merge(merged, df_ts_clean, on='WO No.', how='left')
         
-        # Ensure all numeric columns are float for the final calculations
+        # Ensure all numeric columns are float
         merged['Time carried out'] = merged['Time carried out'].fillna(0.0)
         merged['Hours'] = merged['Hours'].fillna(0.0)
         merged['Total_Hours'] = merged['Time carried out'] + merged['Hours']
@@ -160,22 +162,34 @@ if wip_file and labor_file:
 
         merged[['Used_Rate', 'Est_Labor_Val', 'Est_Parts_Val', 'Invoicing_Status']] = merged.apply(analyze_job, axis=1)
 
-        # --- Filters for Drill-through ---
+        # --- Side Bar Filters ---
         st.sidebar.divider()
-        st.sidebar.header("🔍 Drill-through Filters")
+        st.sidebar.header("🔍 Global Filters")
         
-        # Build tech list safely
+        # Branch Filter
+        branches = sorted(merged['Branch'].dropna().unique().tolist())
+        sel_branch = st.sidebar.multiselect("Filter by Branch", options=branches)
+        
+        # WO Type Filter
+        wo_types = sorted(merged['WO type'].dropna().unique().tolist())
+        sel_wo_type = st.sidebar.multiselect("Filter by WO Type", options=wo_types)
+
+        # Technician Filter
         tech_string = merged['Final_Technician'].str.cat(sep=', ')
         all_techs = sorted(list(set([t.strip() for t in tech_string.split(',') if t.strip()])))
         sel_tech = st.sidebar.multiselect("Filter by Technician", options=all_techs)
         
-        # Ensure Status_Desc is string for sorting/filtering
+        # Status Filter
         merged['Status_Desc'] = merged['Status_Desc'].fillna('UNKNOWN').astype(str)
         all_statuses = sorted(list(merged['Status_Desc'].unique()))
         sel_status = st.sidebar.multiselect("Filter by WO Status", options=all_statuses)
 
-        # Apply Filters
+        # --- Apply All Filters ---
         filtered_df = merged.copy()
+        if sel_branch:
+            filtered_df = filtered_df[filtered_df['Branch'].isin(sel_branch)]
+        if sel_wo_type:
+            filtered_df = filtered_df[filtered_df['WO type'].isin(sel_wo_type)]
         if sel_tech:
             filtered_df = filtered_df[filtered_df['Final_Technician'].apply(lambda x: any(t in str(x) for t in sel_tech))]
         if sel_status:
@@ -183,22 +197,22 @@ if wip_file and labor_file:
 
         # --- Dashboard Display ---
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("WIP Value (Filtered)", f"€{filtered_df['Amount'].sum():,.2f}")
-        c2.metric("Hours (Filtered)", f"{filtered_df['Total_Hours'].sum():,.1f}h")
-        c3.metric("Est. Labor (Filtered)", f"€{filtered_df['Est_Labor_Val'].sum():,.2f}")
+        c1.metric("WIP Value", f"€{filtered_df['Amount'].sum():,.2f}")
+        c2.metric("Labor Hours", f"{filtered_df['Total_Hours'].sum():,.1f}h")
+        c3.metric("Est. Labor Value", f"€{filtered_df['Est_Labor_Val'].sum():,.2f}")
         
         ready_count = len(filtered_df[filtered_df['Invoicing_Status'].str.contains("✅")])
-        c4.metric("Ready Jobs (Filtered)", ready_count)
+        c4.metric("Ready Jobs", ready_count)
 
         st.divider()
         
         st.subheader("Work Order Details")
         cols_to_show = [
-            'WO No.', 'Customer name', 'Status_Desc', 'Final_Technician', 
+            'WO No.', 'Branch', 'WO type', 'Customer name', 'Status_Desc', 'Final_Technician', 
             'Amount', 'Total_Hours', 'Est_Labor_Val', 'Est_Parts_Val', 'Invoicing_Status'
         ]
         
-        # Ensure consistent types before displaying/sorting to avoid the '<' error
+        # Clean data for final table
         final_display = filtered_df[(filtered_df['Amount'] != 0) | (filtered_df['Total_Hours'] != 0)][cols_to_show].copy()
         final_display['Amount'] = final_display['Amount'].astype(float)
         
@@ -209,7 +223,7 @@ if wip_file and labor_file:
 
     except Exception as e:
         st.error(f"Error processing files: {e}")
-        st.info("Ensure files contain expected headers. Error details: " + str(e))
+        st.info("Check if your Excel files have the expected 'Branch' and 'WO type' headers.")
 
 else:
     st.info("Please upload the WIP and Labor Register files in the sidebar to start the analysis.")
